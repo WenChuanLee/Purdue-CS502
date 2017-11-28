@@ -1,0 +1,178 @@
+[Introduction]
+My code can be divided into two big parts. Building control flow graph and
+running backward data flow analysis. There are csproj2.c, csproj2.h, dfa.c,
+hashtable.c and hashtable.h.
+
+- csproj2.c and csproj2.h contain the main function to convert the AST into
+a valid CFG.
+
+- dfa.c is used to do the backward data flow analysis by using the CFG
+  constructed by csproj2.c.
+
+- hashtable.c and hashtable.h are all implemented by myself and it provides
+  the functionality for storing the name of the variables encountered during
+  the construction of the CFG. Because every statement needs the in, out,
+  def and use set, and these sets contain the variable information, there
+  may be mutiple statements use the same variable. In order to prevent them
+  from allocating memory for the same variable, each variable will be stored
+  in hashtable once and shared by the statements that use it. This is an
+  open-addressing hashtable.
+
+[Building Control Flow Graph]
+The CFG is constructed by basic node CFGNode. Basically, every statement
+in the function will be represented as a node. When a statement is
+envountered during AST traversing, new CFGNode will be created.
+Then for different kind of expressions, we can do as tree-pretty-print.c
+do to walk through them and get the def set and use set. Then the def
+and use will be stored in the CFGNode's depOp and useOp. Thus for the
+walkStmt function, there is a parameter ActionType, and every case in
+the switch table will do corresponding things according to the type of
+action.
+
+Every Node will be assigned a node type. Node type is very important
+because it affects the structure of CFG and the correctness of the
+final result. The following will describe how these types are handled.
+
+- Handling NORMAL
+	In addition to get def and use operands, normal statements only have to
+	make their previous statement's (except GOTO statement) next pointer
+	points to them. To handle this, parameter pPrev is passed as the previous
+	statement which has been handled. Because we know the type of the previous
+	node, we can check whether it is a GOTO or not. If not, then we point
+	previous node's next to current node.  Moreover, BIND and LABEL are also
+	have only one out-going path.
+
+- Handling BIND
+	When encountering a bind expressing, I create a bind start CFGNode and a
+	bind end CFGNode. Every bind will have its own bindID and every bind will
+	point to its parent bind because this is important for deciding the scope
+	of a variable used or defined in current bind. Everytime we have a variable,
+	we will check its declaration-bind and rename it related to its declaration
+	bind. This affects the correctness of the final data flow analysis.
+
+	BIND is important and I use all binds to do the final analysis for the
+	uninitialized variables. Thus, a starting bind statement also needs to store
+	its declaration tree and it should know which variables are declared in
+	current bind. Thus, declaration tree information is stored in CFGNode.decls.
+
+- Handling COND
+	IF is easy to handle because it only has at most two branches. For IF, it
+	also creates two new CFGNodes IF_COND and IF_END. The def and use
+	information will stored in IF_COND because it is the first CFGNode
+	of the body. If there is a true branch, then the IF_COND's bTrue will
+	point to the starting CFGNode of the true body, and bFalse will also
+	point to the starting CFGNode of the false body if there is one. If
+	there is no false body, the bFalse will point to IF_END directly. After
+	constructing the basic path, we can do the same thing in the COND's body
+	as we did previously.
+
+- Handling SWITCH
+	SWITCH is the most complex one. In addition to create the SWITCH_COND and
+	SWITCH_END, an auxiliary data structure is also created for handling the
+	nested switch. This data structure is called SwitchData and defined in
+	csproj2.h. It has the information of the starting CFGNode of the switch,
+	the exit statement of the switch, the bind of the switch, and maybe the
+	exitID of the switch, because some SWITCHs may have break some may not.
+
+	When encountering a new switch expr, we will create a new SwitchData and
+	store it at the top of the pSwitchList. Everytime we encounter a case
+	label, we create a new CFGNode for them and we can construct the path
+	correctly because we can access the SWITCH_COND and SWITCH_END by
+	SwitchData. Furthermore, because every SWITCH_COND will have a caseTable
+	allocated, case label CFGNode will be stored in the caseTable of current
+	switch and the path of the CFG will be built correctly.
+
+- Handling LABEL
+	Every label expr will also be a CFGNode in the CFG. Furthermore, every
+	label be stored in a table called labelTable. Because there are some
+	situations like:
+
+	goto D.1234
+	...
+	...
+	D.1234
+	...
+	...
+	goto D.1234
+
+	If we don't store the label information, then some GOTOs will not be
+	handled correctly, so we store every label CFGNode in the table.
+	Every time we encounter a new label expression, we will check if there
+	is a GOTO has not been handled yet. If yes, we make the GOTO CFGNode points
+	to this label CFGNode and store it in the labelTable. The label CFGNode
+	has only one outgoing path points to the next CFGNode.
+
+- Handling GOTO
+	Every GOTO expression will also be a CFGNode int the CFG. A new GOTO
+	CFGNode will be handled as the following decription:
+	If there is a label has the same labelID as the GOTO's target labelID,
+	then we can construct the path between the GOTO and the label. Otherwise,
+	we will store the GOTO CFGNode in the gotoTable. And next time if we have
+	label CFGNode has the same labelID as the GOTO's target labelID, then we
+	can construct the path between them.
+
+- Final
+	Every CFGNode uses nextCFG which points to the next allocated CFGNode.
+	The difference between next and nextCFG is that next points to the next
+	CFGNode in the flow, but nextCFG points to the next CFGNode. The next
+	is will be used in data-flow analysis and nextCFG is just like a chain
+	in the linked list which links all CFGNodes together.
+	After building the CFG, we can pass the it to the data flow analysis
+	function and do the final analysis.
+
+[Data Flow Analysis]
+	There are three main functions to handle data flow analysis, initDFA,
+	beginDFA, and finDFA.
+
+- initDFA
+	This function is used to handle all necessary initialization. Currently,
+	it allocates a table to store all binds because we want to do the final
+	analysis in all binds. Thus, it just walks through the list of CFG and
+	finds out which CFGNode is node type NTBIND and adds it to the bindTable.
+
+- beginDFA
+	This function does the real data flow analysis. For every statement, it
+	checks its node type and finds its successors according to the type.
+	For ecample, if it is a node with NTCOND, then it will get the in set
+	information from bTrue and bFalse. And if it is with NDSWITCH, it
+	will check if it has the casetable, if yes, then it will get all in
+	set information from its successors through the caseTable. For nodes with
+	NTNORMAL, it only get the in set information from next.
+
+	For in set, we don't have to copy the information from use set because
+	use set must be in the in set. Thus, we also check the use set when
+	we are doing the final analysis.
+
+- finDFA
+	After beginDFA, all CFGNodes have set information converged and we can
+	decide which variable is uninitialized and which is not. Thus, we go
+	through the bindTable and analysis all BINDs and analyse their in set
+	and out set. If a variable is also in the in set and out set, we know
+	that this variable has a potential to be an uninitialized variable.
+	However, we also need to check whether it is defined in current bind
+	scope. Because we have a pointer (i.e. CFGNode.decls) in every BIND
+	node points to the decl tree, and we know the bindID of every BIND
+	during constructing the CFG, we can easily determine whether this
+	suspicious variable is declared in this bind, if yes, then we print
+	it out.
+
+[Important Data Structure]
+-CFGNode
+	This is the most important data structure in this implementation. Every
+	statement's information will be stored in a CFGNode such as its type, def,
+	use, in, out, successors, etc. This is the fundamental element of a CFG.
+
+-SwitchData
+	This helps me to handle the nested switch and I can construct the CFG
+	directly through this data structure. When encountering a new switch,
+	I put it on the top of a switch list like a stack, and pop it after
+	traversing its switch body. And this SwitchData contains all needed
+	information for constructing a path during I traversing the seitch
+	body.
+
+-hashtable
+	Used to store the name of a variable to make sure that one name will
+	be stored once in the memory for saving the memory usage.
+
+[Cases can be handled]
+	All announced in the course.

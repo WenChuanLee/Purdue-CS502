@@ -1,0 +1,4 @@
+1. Run make
+2. Run ./cc1 test.c
+3. See output.txt
+4. Document is written in report.txt
